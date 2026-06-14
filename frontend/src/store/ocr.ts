@@ -1,6 +1,14 @@
-import { ref, computed } from 'vue'
+import { ref, computed, watch, nextTick } from 'vue'
 import { defineStore } from 'pinia'
 import type { Document, OCRResult, Annotation, ReviewStats } from '../types'
+
+const STORAGE_KEY = 'ancient-ocr-store-v1'
+
+interface PersistedState {
+  documents: Document[]
+  currentDocId: string | null
+  reviewThreshold: number
+}
 
 export const useOcrStore = defineStore('ocr', () => {
   const documents = ref<Document[]>([])
@@ -13,6 +21,7 @@ export const useOcrStore = defineStore('ocr', () => {
   const reviewThreshold = ref(0.9)
   const reviewCurrentIndex = ref(0)
   const reviewStats = ref<ReviewStats | null>(null)
+  const needsImageRestore = ref<string | null>(null)
 
   const lowConfidenceResults = computed(() => {
     if (!currentDoc.value) return []
@@ -32,10 +41,9 @@ export const useOcrStore = defineStore('ocr', () => {
     return Math.round((reviewed / total) * 100)
   })
 
-  // Mock data
   const MOCK_DOC: Document = {
-    id: '1',
-    name: '论语·学而篇',
+    id: 'mock-1',
+    name: '论语·学而篇（示例）',
     imageUrl: '',
     results: [
       { id: 'r1', text: '子曰', bbox: [50, 30, 80, 40], confidence: 0.95, reviewed: false },
@@ -56,34 +64,176 @@ export const useOcrStore = defineStore('ocr', () => {
     '風': '风', '雲': '云', '龍': '龙', '車': '车', '萬': '万', '見': '见',
   }
 
+  let saveTimer: ReturnType<typeof setTimeout> | null = null
+  let persistenceReady = false
+
+  function debouncedSave() {
+    if (!persistenceReady) return
+    if (saveTimer) clearTimeout(saveTimer)
+    saveTimer = setTimeout(() => {
+      saveToStorage()
+    }, 100)
+  }
+
+  function saveToStorage() {
+    try {
+      const docsSnapshot = JSON.parse(JSON.stringify(documents.value)) as Document[]
+      docsSnapshot.forEach(d => {
+        if (d.imageUrl && d.imageUrl.startsWith('blob:')) {
+          d.imageUrl = ''
+        }
+      })
+      const state: PersistedState = {
+        documents: docsSnapshot,
+        currentDocId: currentDoc.value?.id ?? null,
+        reviewThreshold: reviewThreshold.value
+      }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
+    } catch (e) {
+      console.warn('Failed to save to localStorage:', e)
+    }
+  }
+
+  function loadFromStorage() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY)
+      if (!raw) return false
+      const state: PersistedState = JSON.parse(raw)
+      if (state.documents && state.documents.length > 0) {
+        documents.value = state.documents.map(d => ({
+          ...d,
+          results: d.results.map(r => ({
+            ...r,
+            reviewed: r.reviewed === true ? true : false,
+            corrected: r.corrected ?? undefined
+          })),
+          annotations: d.annotations || []
+        }))
+        if (typeof state.reviewThreshold === 'number') {
+          reviewThreshold.value = state.reviewThreshold
+        }
+        if (state.currentDocId) {
+          const found = documents.value.find(d => d.id === state.currentDocId)
+          if (found) {
+            currentDoc.value = found
+            if (!found.imageUrl && found.id !== 'mock-1') {
+              needsImageRestore.value = found.id
+            }
+            updateReviewStats()
+            return true
+          }
+        }
+        currentDoc.value = documents.value[0]
+        if (currentDoc.value && !currentDoc.value.imageUrl && currentDoc.value.id !== 'mock-1') {
+          needsImageRestore.value = currentDoc.value.id
+        }
+        if (currentDoc.value) {
+          updateReviewStats()
+        }
+        return true
+      }
+    } catch (e) {
+      console.warn('Failed to load from localStorage:', e)
+    }
+    return false
+  }
+
+  function clearStorage() {
+    documents.value = []
+    currentDoc.value = null
+    localStorage.removeItem(STORAGE_KEY)
+  }
+
+  function restoreImageForDoc(docId: string, file: File) {
+    const doc = documents.value.find(d => d.id === docId)
+    if (doc) {
+      doc.imageUrl = URL.createObjectURL(file)
+      if (currentDoc.value?.id === docId) {
+        currentDoc.value.imageUrl = doc.imageUrl
+      }
+      needsImageRestore.value = null
+      debouncedSave()
+    }
+  }
+
+  function getOrCreateMock(): Document {
+    const existing = documents.value.find(d => d.id === 'mock-1')
+    if (existing) return existing
+    const doc = JSON.parse(JSON.stringify(MOCK_DOC)) as Document
+    documents.value.push(doc)
+    return doc
+  }
+
   function loadMockDocument() {
-    documents.value = [MOCK_DOC]
-    currentDoc.value = MOCK_DOC
+    const mock = getOrCreateMock()
+    currentDoc.value = mock
+    updateReviewStats()
+    debouncedSave()
   }
 
   async function uploadAndOCR(file: File) {
     isLoading.value = true
     try {
+      const existingByName = documents.value.find(d => d.name === file.name && d.id !== 'mock-1')
+      const blobUrl = URL.createObjectURL(file)
+
       const formData = new FormData()
       formData.append('file', file)
       const resp = await fetch('/api/ocr', { method: 'POST', body: formData })
       if (resp.ok) {
         const data = await resp.json()
-        const doc: Document = {
-          id: data.id || Date.now().toString(),
-          name: file.name,
-          imageUrl: URL.createObjectURL(file),
-          results: (data.results || []).map((r: OCRResult) => ({ ...r, reviewed: false })),
-          annotations: [],
-          createdAt: new Date().toISOString()
+        const docId = data.id || `doc-${Date.now()}`
+
+        if (existingByName) {
+          existingByName.imageUrl = blobUrl
+          if (currentDoc.value?.id === existingByName.id) {
+            currentDoc.value.imageUrl = blobUrl
+          }
+          if (data.results && data.results.length > 0) {
+            const newResults = data.results.map((r: OCRResult) => {
+              const old = existingByName.results.find(x => x.id === r.id)
+              return {
+                ...r,
+                reviewed: old?.reviewed ?? false,
+                corrected: old?.corrected ?? undefined
+              }
+            })
+            existingByName.results = newResults
+          }
+          currentDoc.value = existingByName
+        } else {
+          const doc: Document = {
+            id: docId,
+            name: file.name,
+            imageUrl: blobUrl,
+            results: (data.results || []).map((r: OCRResult) => ({
+              ...r,
+              reviewed: false
+            })),
+            annotations: [],
+            createdAt: new Date().toISOString()
+          }
+          documents.value.push(doc)
+          currentDoc.value = doc
         }
-        documents.value.push(doc)
-        currentDoc.value = doc
+      } else {
+        throw new Error('OCR failed')
       }
     } catch {
-      loadMockDocument()
+      const existingByName = documents.value.find(d => d.name === file.name && d.id !== 'mock-1')
+      const blobUrl = URL.createObjectURL(file)
+      if (existingByName) {
+        existingByName.imageUrl = blobUrl
+        currentDoc.value = existingByName
+      } else {
+        loadMockDocument()
+      }
     } finally {
       isLoading.value = false
+      if (currentDoc.value) {
+        updateReviewStats()
+      }
+      debouncedSave()
     }
   }
 
@@ -93,11 +243,13 @@ export const useOcrStore = defineStore('ocr', () => {
       id: Date.now().toString(),
       type, bbox, label, content
     })
+    debouncedSave()
   }
 
   function removeAnnotation(id: string) {
     if (!currentDoc.value) return
     currentDoc.value.annotations = currentDoc.value.annotations.filter(a => a.id !== id)
+    debouncedSave()
   }
 
   function convertVariant(text: string): string {
@@ -134,10 +286,12 @@ export const useOcrStore = defineStore('ocr', () => {
       reviewCurrentIndex.value = unreviewed
     }
     updateReviewStats()
+    debouncedSave()
   }
 
   function exitReviewMode() {
     reviewModeActive.value = false
+    debouncedSave()
   }
 
   function updateReviewStats() {
@@ -185,6 +339,7 @@ export const useOcrStore = defineStore('ocr', () => {
       }
       target.reviewed = true
       updateReviewStats()
+      debouncedSave()
     }
   }
 
@@ -193,11 +348,13 @@ export const useOcrStore = defineStore('ocr', () => {
     const target = currentDoc.value.results.find(r => r.id === resultId)
     if (target) {
       target.corrected = corrected
+      debouncedSave()
     }
   }
 
   async function saveCorrectionsToBackend() {
     if (!currentDoc.value) return
+    saveToStorage()
     try {
       const corrections = currentDoc.value.results
         .filter(r => r.corrected !== undefined || r.reviewed)
@@ -208,18 +365,51 @@ export const useOcrStore = defineStore('ocr', () => {
         body: JSON.stringify({ corrections })
       })
     } catch {
-      // Silently fail - corrections are stored locally
+      // Silently fail - localStorage is the primary persistence
     }
   }
+
+  // Initial load
+  const loaded = loadFromStorage()
+  if (!loaded) {
+    // No persisted data, wait for user to load mock or upload
+  }
+  nextTick(() => {
+    persistenceReady = true
+  })
+
+  // Watch documents deeply for any changes (corrections, review flags, annotations)
+  watch(
+    documents,
+    () => {
+      debouncedSave()
+    },
+    { deep: true }
+  )
+
+  // Watch threshold changes
+  watch(reviewThreshold, () => {
+    debouncedSave()
+  })
+
+  // Watch current document switch
+  watch(
+    () => currentDoc.value?.id,
+    () => {
+      debouncedSave()
+      updateReviewStats()
+    }
+  )
 
   return {
     documents, currentDoc, isLoading, searchQuery, searchResults,
     reviewModeActive, reviewThreshold, reviewCurrentIndex, reviewStats,
-    lowConfidenceResults, currentReviewItem, reviewProgress,
+    lowConfidenceResults, currentReviewItem, reviewProgress, needsImageRestore,
     loadMockDocument, uploadAndOCR, addAnnotation, removeAnnotation,
     convertVariant, searchInDocuments, exportTEI,
     enterReviewMode, exitReviewMode, updateReviewStats,
     goToNextReviewItem, goToPrevReviewItem, goToReviewItem,
-    markCurrentReviewed, updateCorrection, saveCorrectionsToBackend
+    markCurrentReviewed, updateCorrection, saveCorrectionsToBackend,
+    saveToStorage, loadFromStorage, clearStorage, restoreImageForDoc
   }
 })

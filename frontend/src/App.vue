@@ -15,6 +15,13 @@
         加载示例文档
       </button>
 
+      <button v-if="store.currentDoc && !store.currentDoc.imageUrl && !store.currentDoc.id.startsWith('mock-')">
+        <label class="block w-full bg-blue-600 text-white text-center py-2 rounded cursor-pointer hover:bg-blue-500 text-sm font-medium">
+          恢复「{{ store.currentDoc.name }}」图片
+          <input ref="restoreInput" type="file" accept="image/*" @change="onRestoreImage" class="hidden" />
+        </label>
+      </button>
+
       <!-- Low confidence review mode button -->
       <button v-if="store.currentDoc && !store.reviewModeActive"
         @click="store.enterReviewMode()"
@@ -46,10 +53,19 @@
       <!-- Document list -->
       <div class="flex-1 overflow-y-auto space-y-1">
         <div v-for="d in store.documents" :key="d.id" @click="store.currentDoc = d"
-          class="bg-gray-800 rounded p-2 cursor-pointer text-sm"
+          class="bg-gray-800 rounded p-2 cursor-pointer text-sm relative"
           :class="store.currentDoc?.id === d.id ? 'ring-1 ring-amber-500' : ''">
-          {{ d.name }}
-          <div class="text-xs text-gray-500">{{ d.results.length }} 行识别</div>
+          <div class="flex items-center justify-between">
+            <span class="truncate">{{ d.name }}</span>
+            <span v-if="!d.id.startsWith('mock-') && !d.imageUrl"
+              class="text-xs text-yellow-400 ml-1 shrink-0" title="图片已失效，需重新上传">⚠</span>
+          </div>
+          <div class="text-xs text-gray-500">
+            {{ d.results.length }} 行识别
+            <span v-if="getReviewedCount(d) > 0" class="text-green-500">
+              · 已复核 {{ getReviewedCount(d) }}
+            </span>
+          </div>
         </div>
       </div>
 
@@ -57,12 +73,32 @@
       <button @click="doExport" class="bg-green-700 py-2 rounded text-sm hover:bg-green-600">
         导出 TEI/XML
       </button>
+
+      <button @click="doClearStorage"
+        class="bg-gray-800 text-gray-400 border border-gray-700 py-2 rounded text-xs hover:bg-red-900 hover:text-red-300 hover:border-red-800 transition-colors">
+        清空本地缓存数据
+      </button>
     </div>
 
     <!-- Center: Image + OCR overlay -->
     <div class="flex-1 relative bg-gray-950 overflow-hidden">
       <ImageCanvas v-if="store.currentDoc" />
-      <div v-else class="flex items-center justify-center h-full text-gray-600">
+      <div v-if="store.currentDoc && !store.currentDoc.id.startsWith('mock-') && !store.currentDoc.imageUrl"
+        class="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+        <div class="bg-gray-900/90 border border-yellow-700 rounded-lg p-6 text-center max-w-md pointer-events-auto">
+          <div class="text-yellow-400 text-4xl mb-3">⚠️</div>
+          <div class="text-yellow-300 font-medium mb-2">图片预览已失效</div>
+          <div class="text-gray-400 text-sm mb-4">
+            页面刷新后图片预览链接会失效，但 OCR 结果、校正文字和复核状态均已保存。
+            <br />请重新上传同名图片以恢复预览：
+          </div>
+          <label class="inline-block bg-amber-500 text-black px-6 py-2 rounded cursor-pointer hover:bg-amber-400 text-sm font-medium">
+            选择图片恢复预览
+            <input ref="restoreInputCenter" type="file" accept="image/*" @change="onRestoreImage" class="hidden" />
+          </label>
+        </div>
+      </div>
+      <div v-if="!store.currentDoc" class="flex items-center justify-center h-full text-gray-600">
         请上传古籍图片或加载示例文档
       </div>
     </div>
@@ -115,15 +151,35 @@
 </template>
 
 <script setup lang="ts">
+import { ref } from 'vue'
 import { useOcrStore } from './store/ocr'
 import ImageCanvas from './components/ImageCanvas.vue'
 import ReviewPanel from './components/ReviewPanel.vue'
+import type { Document } from './types'
 
 const store = useOcrStore()
+const restoreInput = ref<HTMLInputElement | null>(null)
+const restoreInputCenter = ref<HTMLInputElement | null>(null)
+
+function getReviewedCount(doc: Document): number {
+  return doc.results.filter(r => r.reviewed).length
+}
 
 function onUpload(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0]
   if (file) store.uploadAndOCR(file)
+}
+
+function triggerRestoreImage() {
+  restoreInput.value?.click()
+}
+
+function onRestoreImage(e: Event) {
+  const file = (e.target as HTMLInputElement).files?.[0]
+  if (file && store.currentDoc) {
+    store.restoreImageForDoc(store.currentDoc.id, file)
+  }
+  ;(e.target as HTMLInputElement).value = ''
 }
 
 function onCorrectionChange(id: string, corrected: string | undefined) {
@@ -142,5 +198,12 @@ function doExport() {
   a.download = `${store.currentDoc?.name || 'export'}.xml`
   a.click()
   URL.revokeObjectURL(url)
+}
+
+function doClearStorage() {
+  if (confirm('确定要清空所有本地缓存数据吗？\n已保存的校正结果和复核状态将全部丢失。')) {
+    store.clearStorage()
+    location.reload()
+  }
 }
 </script>
