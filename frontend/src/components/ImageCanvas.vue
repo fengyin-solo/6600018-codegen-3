@@ -10,8 +10,22 @@
     <svg class="absolute inset-0 w-full h-full pointer-events-none">
       <g v-for="r in store.currentDoc?.results || []" :key="r.id">
         <rect :x="r.bbox[0]" :y="r.bbox[1]" :width="r.bbox[2]" :height="r.bbox[3]"
-          fill="none" stroke="rgba(251,191,36,0.6)" stroke-width="2" />
-        <text :x="r.bbox[0]" :y="r.bbox[1] - 5" fill="#fbbf24" font-size="12">{{ r.text }}</text>
+          :fill="getBoxFill(r)"
+          :stroke="getBoxStroke(r)"
+          :stroke-width="getBoxStrokeWidth(r)"
+          :class="{ 'animate-pulse': isCurrentReviewItem(r) }" />
+        <text :x="r.bbox[0]" :y="r.bbox[1] - 5"
+          :fill="getTextColor(r)"
+          :font-weight="isCurrentReviewItem(r) ? 'bold' : 'normal'"
+          font-size="12">
+          {{ r.corrected || r.text }}
+        </text>
+        <text v-if="store.reviewModeActive && r.reviewed"
+          :x="r.bbox[0] + r.bbox[2] - 10"
+          :y="r.bbox[1] - 5"
+          fill="#22c55e"
+          font-size="12"
+          font-weight="bold">✓</text>
       </g>
       <!-- Annotations -->
       <g v-for="a in store.currentDoc?.annotations || []" :key="a.id">
@@ -29,6 +43,7 @@
 <script setup lang="ts">
 import { ref, onMounted, reactive } from 'vue'
 import { useOcrStore } from '../store/ocr'
+import type { OCRResult } from '../types'
 
 const store = useOcrStore()
 const mockCanvas = ref<HTMLCanvasElement | null>(null)
@@ -36,6 +51,40 @@ const imgRef = ref<HTMLImageElement | null>(null)
 const dragging = ref(false)
 const dragStart = reactive({ x: 0, y: 0 })
 const dragRect = reactive({ x: 0, y: 0, w: 0, h: 0 })
+
+function isCurrentReviewItem(r: OCRResult): boolean {
+  return store.reviewModeActive && store.currentReviewItem?.id === r.id
+}
+
+function isLowConfidence(r: OCRResult): boolean {
+  return r.confidence < store.reviewThreshold
+}
+
+function getBoxFill(r: OCRResult): string {
+  if (isCurrentReviewItem(r)) return 'rgba(239,68,68,0.2)'
+  if (r.reviewed) return 'rgba(34,197,94,0.1)'
+  if (store.reviewModeActive && isLowConfidence(r)) return 'rgba(251,191,36,0.15)'
+  return 'none'
+}
+
+function getBoxStroke(r: OCRResult): string {
+  if (isCurrentReviewItem(r)) return '#ef4444'
+  if (r.reviewed) return '#22c55e'
+  if (store.reviewModeActive && isLowConfidence(r)) return '#f59e0b'
+  return 'rgba(251,191,36,0.6)'
+}
+
+function getBoxStrokeWidth(r: OCRResult): number {
+  if (isCurrentReviewItem(r)) return 3
+  if (store.reviewModeActive && isLowConfidence(r)) return 2.5
+  return 2
+}
+
+function getTextColor(r: OCRResult): string {
+  if (isCurrentReviewItem(r)) return '#ef4444'
+  if (r.reviewed) return '#22c55e'
+  return '#fbbf24'
+}
 
 onMounted(() => {
   if (mockCanvas.value) {

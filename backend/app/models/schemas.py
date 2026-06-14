@@ -8,6 +8,7 @@ class OCRResult(BaseModel):
     bbox: List[float]
     confidence: float
     corrected: Optional[str] = None
+    reviewed: Optional[bool] = False
 
 
 class Document(BaseModel):
@@ -24,3 +25,18 @@ class Annotation(BaseModel):
     bbox: List[float]
     label: str
     content: str
+
+
+class LowConfidenceRequest(BaseModel):
+    threshold: float = 0.9
+
+
+class BatchCorrectionRequest(BaseModel):
+    corrections: List[dict]
+
+
+class ReviewStats(BaseModel):
+    total: int
+    low_confidence: int
+    reviewed: int
+    remaining: int

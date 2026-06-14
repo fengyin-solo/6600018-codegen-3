@@ -15,6 +15,23 @@
         加载示例文档
       </button>
 
+      <!-- Low confidence review mode button -->
+      <button v-if="store.currentDoc && !store.reviewModeActive"
+        @click="store.enterReviewMode()"
+        class="bg-red-700 hover:bg-red-600 py-2 rounded text-sm font-medium flex items-center justify-center gap-2">
+        <span class="w-2 h-2 bg-red-400 rounded-full animate-pulse"></span>
+        低置信度复核模式
+        <span class="text-xs bg-red-900 px-1.5 py-0.5 rounded">
+          {{ store.lowConfidenceResults.length }} 项
+        </span>
+      </button>
+
+      <button v-if="store.reviewModeActive"
+        @click="store.exitReviewMode()"
+        class="bg-red-900 text-red-300 border border-red-700 py-2 rounded text-sm font-medium">
+        退出复核模式
+      </button>
+
       <!-- Search -->
       <div>
         <input v-model="store.searchQuery" @input="store.searchInDocuments(store.searchQuery)"
@@ -50,23 +67,34 @@
       </div>
     </div>
 
-    <!-- Right: OCR results & annotations -->
-    <div class="w-80 bg-gray-900 p-4 flex flex-col gap-3 border-l border-gray-800 overflow-y-auto">
+    <!-- Right: Review Panel OR OCR results & annotations -->
+    <div v-if="store.reviewModeActive" class="w-96">
+      <ReviewPanel />
+    </div>
+    <div v-else class="w-80 bg-gray-900 p-4 flex flex-col gap-3 border-l border-gray-800 overflow-y-auto">
       <h3 class="text-amber-300 font-bold text-sm">OCR 识别结果</h3>
       <div v-if="store.currentDoc" class="space-y-2">
         <div v-for="r in store.currentDoc.results" :key="r.id"
-          class="bg-gray-800 rounded p-2 text-sm">
+          class="bg-gray-800 rounded p-2 text-sm"
+          :class="{ 'ring-1 ring-green-500': r.reviewed }">
           <div class="flex justify-between">
-            <span class="text-white font-medium">{{ r.text }}</span>
-            <span class="text-xs px-2 py-0.5 rounded"
-              :class="r.confidence > 0.9 ? 'bg-green-900 text-green-400' : 'bg-yellow-900 text-yellow-400'">
-              {{ (r.confidence * 100).toFixed(0) }}%
-            </span>
+            <span class="text-white font-medium">{{ r.corrected || r.text }}</span>
+            <div class="flex items-center gap-1">
+              <span v-if="r.reviewed" class="text-green-400 text-xs">✓</span>
+              <span class="text-xs px-2 py-0.5 rounded"
+                :class="r.confidence > 0.9 ? 'bg-green-900 text-green-400' : 'bg-yellow-900 text-yellow-400'">
+                {{ (r.confidence * 100).toFixed(0) }}%
+              </span>
+            </div>
+          </div>
+          <div v-if="r.corrected && r.text !== r.corrected" class="text-xs text-gray-500 mt-1">
+            原文: <span class="line-through">{{ r.text }}</span>
           </div>
           <div class="text-xs text-gray-400 mt-1">
-            简体: {{ store.convertVariant(r.text) }}
+            简体: {{ store.convertVariant(r.corrected || r.text) }}
           </div>
           <input v-model="r.corrected" placeholder="人工校正..."
+            @blur="onCorrectionChange(r.id, r.corrected)"
             class="w-full bg-gray-700 rounded px-2 py-1 text-xs mt-1" />
         </div>
       </div>
@@ -89,12 +117,19 @@
 <script setup lang="ts">
 import { useOcrStore } from './store/ocr'
 import ImageCanvas from './components/ImageCanvas.vue'
+import ReviewPanel from './components/ReviewPanel.vue'
 
 const store = useOcrStore()
 
 function onUpload(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0]
   if (file) store.uploadAndOCR(file)
+}
+
+function onCorrectionChange(id: string, corrected: string | undefined) {
+  if (corrected !== undefined) {
+    store.updateCorrection(id, corrected)
+  }
 }
 
 function doExport() {
